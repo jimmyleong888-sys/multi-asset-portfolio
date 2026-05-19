@@ -1791,7 +1791,7 @@ let settings = {
   finnhubKey: '',
   tiingoKey: '',
   fredKey: '',
-  corsProxy: 'http://localhost:8080/proxy?url=',  // default to local helper; fallback when helper unreachable
+  corsProxy: 'https://api.allorigins.win/raw?url=',  // public proxy works on iPhone/GitHub Pages; local helper overrides if running
   igHelperUrl: 'http://localhost:8080',           // local IG helper, optional
   refreshInterval: 60,
   autoEnabled: false,
@@ -1823,11 +1823,12 @@ function loadState() {
     const sraw = localStorage.getItem(SETTINGS_KEY);
     if (sraw) {
       settings = Object.assign(settings, JSON.parse(sraw));
-      // Migration: corsproxy.io paywalled non-localhost origins in May 2026.
-      if (settings.corsProxy === 'https://corsproxy.io/?url=') {
-        settings.corsProxy = 'http://localhost:8080/proxy?url=';
+      // If corsProxy is localhost and we're on GitHub Pages / remote, reset to public proxy
+      const isRemote = !window.location.hostname.includes('localhost') && !window.location.hostname.includes('127.0.0.1');
+      if (isRemote && settings.corsProxy && settings.corsProxy.includes('localhost')) {
+        settings.corsProxy = 'https://api.allorigins.win/raw?url=';
         saveSettingsToStorage();
-        console.info('[settings] Migrated corsProxy → local IG helper proxy');
+        console.info('[settings] Remote host detected — switched CORS proxy to public proxy');
       }
     }
     // Restore cached FX rates if present (so KPIs show converted values immediately on load, before refresh)
@@ -3552,8 +3553,20 @@ async function fetchFxRatesForBase() {
   const list = [...ccys].join(',');
   const directUrl = `https://api.frankfurter.app/latest?from=${encodeURIComponent(base)}&to=${encodeURIComponent(list)}`;
   const attempts = [{ label: 'direct', url: directUrl }];
-  if (settings.corsProxy) {
-    attempts.push({ label: 'via proxy', url: settings.corsProxy + encodeURIComponent(directUrl) });
+  // User-configured proxy first
+  if (settings.corsProxy && !settings.corsProxy.includes('localhost')) {
+    attempts.push({ label: 'user proxy', url: settings.corsProxy + encodeURIComponent(directUrl) });
+  }
+  // Public fallback proxies (tried in order if above fail)
+  const PUBLIC_PROXIES = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?url=',
+    'https://proxy.cors.sh/',
+  ];
+  PUBLIC_PROXIES.forEach((p, i) => attempts.push({ label: `public-proxy-${i+1}`, url: p + encodeURIComponent(directUrl) }));
+  // Local helper last (works when on Mac)
+  if (settings.corsProxy && settings.corsProxy.includes('localhost')) {
+    attempts.push({ label: 'local helper', url: settings.corsProxy + encodeURIComponent(directUrl) });
   }
   console.info(`[FX] Fetching rates for ${list} → ${base}`);
   for (const { label, url } of attempts) {
@@ -3596,7 +3609,13 @@ async function fetchFxRates() {
   for (const base of Object.keys(byBase)) {
     const quotes = Array.from(byBase[base]).join(',');
     try {
-      const r = await fetch(`https://api.frankfurter.app/latest?from=${encodeURIComponent(base)}&to=${encodeURIComponent(quotes)}`);
+      let r;
+  try {
+    r = await fetch(`https://api.frankfurter.app/latest?from=${encodeURIComponent(base)}&to=${encodeURIComponent(quotes)}`);
+  } catch(e) {
+    // CORS blocked — try public proxy
+    r = await fetch(`https://api.allorigins.win/raw?url=` + encodeURIComponent(`https://api.frankfurter.app/latest?from=${encodeURIComponent(base)}&to=${encodeURIComponent(quotes)}`));
+  }
       if (!r.ok) { errors++; continue; }
       const j = await r.json();
       if (j && j.rates) {
